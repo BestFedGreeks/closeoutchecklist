@@ -574,6 +574,8 @@ const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwtWcp6ZRXdCteCKzkI_
 const totalItems = 46;
 let checkedCount = 0;
 let approvalState = null;
+// Keep our own photo queue because mobile camera captures often replace the native input file list.
+let selectedPhotos = [];
 
 document.getElementById('closeoutDate').value = new Date().toISOString().split('T')[0];
 document.getElementById('semesterSelect').addEventListener('change', function() {
@@ -690,22 +692,72 @@ function updateProgress() {
 }
 
 function handlePhotos(input) {
+  const newFiles = Array.from(input.files || []);
+  newFiles.forEach(file => {
+    const key = [file.name, file.size, file.lastModified].join('|');
+    const alreadyQueued = selectedPhotos.some(existing => [existing.name, existing.size, existing.lastModified].join('|') === key);
+    if (!alreadyQueued) selectedPhotos.push(file);
+  });
+
+  // Important for mobile camera: clearing the input lets the next camera shot append to our queue
+  // instead of replacing the browser's native FileList.
+  input.value = '';
+  renderPhotoPreviews();
+}
+
+function removePhoto(index) {
+  selectedPhotos.splice(index, 1);
+  renderPhotoPreviews();
+}
+
+function renderPhotoPreviews() {
   const previews = document.getElementById('photoPreviews');
   const count = document.getElementById('photoCount');
   previews.innerHTML = '';
-  Array.from(input.files).forEach(file => {
-    const reader = new FileReader();
-    reader.onload = e => {
-      const img = document.createElement('img');
-      img.src = e.target.result;
-      img.className = 'photo-thumb';
-      previews.appendChild(img);
+
+  selectedPhotos.forEach((file, index) => {
+    const wrap = document.createElement('div');
+    wrap.style.position = 'relative';
+    wrap.style.width = '76px';
+    wrap.style.height = '76px';
+
+    const img = document.createElement('img');
+    img.className = 'photo-thumb';
+    img.alt = 'Selected photo ' + (index + 1);
+    wrap.appendChild(img);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', 'Remove photo ' + (index + 1));
+    remove.onclick = function(e) {
+      e.stopPropagation();
+      removePhoto(index);
     };
+    remove.style.position = 'absolute';
+    remove.style.top = '-7px';
+    remove.style.right = '-7px';
+    remove.style.width = '22px';
+    remove.style.height = '22px';
+    remove.style.borderRadius = '50%';
+    remove.style.border = '1px solid #e8e4dc';
+    remove.style.background = '#fff';
+    remove.style.color = '#777';
+    remove.style.fontSize = '16px';
+    remove.style.lineHeight = '18px';
+    remove.style.cursor = 'pointer';
+    wrap.appendChild(remove);
+
+    previews.appendChild(wrap);
+
+    const reader = new FileReader();
+    reader.onload = e => { img.src = e.target.result; };
     reader.readAsDataURL(file);
   });
-  const n = input.files.length;
+
+  const n = selectedPhotos.length;
   count.style.display = n > 0 ? 'block' : 'none';
-  count.textContent = n + ' photo' + (n !== 1 ? 's' : '') + ' selected';
+  count.innerHTML = n + ' photo' + (n !== 1 ? 's' : '') + ' queued. You can tap upload again to add more photos.<br><span style="color:#b45309;">Do not close this page after submitting until the success screen appears.</span>';
 }
 
 function handleVideo(input) {
@@ -774,7 +826,7 @@ async function submitForm() {
   const semester = document.getElementById('semesterSelect').value;
   const hdName = document.getElementById('hdName').value.trim();
   const hdEmail = document.getElementById('hdEmail').value.trim();
-  const photoFiles = Array.from(document.getElementById('photoInput').files || []);
+  const photoFiles = selectedPhotos.slice();
   const kuVisible = document.getElementById('kuManagerGroup').style.display !== 'none';
   const kuPicked = document.getElementById('kuManagerSelect').value;
   const note = document.getElementById('requiredNote');
@@ -800,7 +852,7 @@ async function submitForm() {
 
   note.style.display = 'none';
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Uploading...';
+  submitBtn.textContent = 'Submitting...';
 
   try {
     // Collect checked items
@@ -830,7 +882,7 @@ async function submitForm() {
       hasVideo: hasVideo
     };
 
-    setUploadProgress('Submitting closeout details...', 0, photoFiles.length);
+    setUploadProgress('Submitting closeout details. Do not close this page...', 0, photoFiles.length);
 
     await postJsonNoCors({
       type: 'text_data',
@@ -839,10 +891,10 @@ async function submitForm() {
 
     for (let i = 0; i < photoFiles.length; i++) {
       const file = photoFiles[i];
-      setUploadProgress('Reading photo ' + (i + 1) + ' of ' + photoFiles.length + ': ' + file.name, i, photoFiles.length);
+      setUploadProgress('Preparing photo ' + (i + 1) + ' of ' + photoFiles.length + '. Do not close this page...', i, photoFiles.length);
       const photo = await fileToBase64(file);
 
-      setUploadProgress('Uploading photo ' + (i + 1) + ' of ' + photoFiles.length + ': ' + file.name, i, photoFiles.length);
+      setUploadProgress('Uploading photo ' + (i + 1) + ' of ' + photoFiles.length + '. Do not close this page...', i, photoFiles.length);
       await postJsonNoCors({
         type: 'file_upload',
         university, chapter, semester,
@@ -852,10 +904,10 @@ async function submitForm() {
         fileName: 'photo_' + (i + 1) + '.' + photo.ext
       });
 
-      setUploadProgress('Uploaded photo ' + (i + 1) + ' of ' + photoFiles.length, i + 1, photoFiles.length);
+      setUploadProgress('Uploaded photo ' + (i + 1) + ' of ' + photoFiles.length + '. Keep this page open...', i + 1, photoFiles.length);
     }
 
-    setUploadProgress('Upload complete. Finalizing...', photoFiles.length, photoFiles.length);
+    setUploadProgress('Upload complete. Finalizing submission...', photoFiles.length, photoFiles.length);
 
     document.getElementById('mainForm').style.display = 'none';
     document.getElementById('successScreen').style.display = 'block';
