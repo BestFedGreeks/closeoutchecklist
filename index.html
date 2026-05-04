@@ -79,6 +79,11 @@
   .required-note { font-size: 12px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px 12px; margin-bottom: 1rem; display: none; }
   .submit-btn { width: 100%; padding: 15px; background: #c9a84c; color: #fff; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; letter-spacing: 0.02em; transition: all 0.15s; font-family: inherit; }
   .submit-btn:active { transform: scale(0.98); background: #b8963e; }
+  .submit-btn:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
+  .upload-status { font-size: 13px; color: #333; background: #f8f6f2; border: 1px solid #e8e4dc; border-radius: 8px; padding: 11px 12px; margin-bottom: 1rem; display: none; line-height: 1.5; }
+  .upload-status strong { color: #1a1a1a; }
+  .upload-meter { height: 6px; background: #e8e4dc; border-radius: 999px; margin-top: 8px; overflow: hidden; }
+  .upload-meter-fill { height: 100%; width: 0%; background: #c9a84c; border-radius: 999px; transition: width 0.25s ease; }
   .submit-note { font-size: 12px; color: #aaa; text-align: center; margin-top: 10px; line-height: 1.5; }
 
   .success-screen { display: none; padding: 4rem 1.5rem; text-align: center; }
@@ -512,7 +517,11 @@
 
     <div class="submit-section">
       <div class="required-note" id="requiredNote"></div>
-      <button class="submit-btn" onclick="submitForm()">Submit closeout</button>
+      <div class="upload-status" id="uploadStatus">
+        <div id="uploadStatusText">Preparing upload...</div>
+        <div class="upload-meter"><div class="upload-meter-fill" id="uploadMeterFill"></div></div>
+      </div>
+      <button class="submit-btn" id="submitBtn" onclick="submitForm()">Submit closeout</button>
       <div class="submit-note">Submission completed</div>
     </div>
 
@@ -717,7 +726,47 @@ function setApproval(val) {
   document.getElementById('btn-no').className = 'toggle-btn' + (val === 'no' ? ' active-no' : '');
 }
 
-function submitForm() {
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const base64 = e.target.result.split(',')[1];
+      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+      resolve({
+        data: base64,
+        mimeType: file.type || 'image/jpeg',
+        ext: ext,
+        originalName: file.name
+      });
+    };
+    reader.onerror = () => reject(new Error('Could not read ' + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+function setUploadProgress(message, current, total) {
+  const status = document.getElementById('uploadStatus');
+  const text = document.getElementById('uploadStatusText');
+  const fill = document.getElementById('uploadMeterFill');
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+
+  status.style.display = 'block';
+  text.innerHTML = message + (total > 0 ? ' <strong>(' + current + ' of ' + total + ')</strong>' : '');
+  fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+
+async function postJsonNoCors(payload) {
+  // Apps Script web apps are usually called with no-cors from GitHub Pages.
+  // Awaiting this still keeps the page open until the browser finishes sending the request.
+  return fetch(SCRIPT_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(payload)
+  });
+}
+
+async function submitForm() {
   const chefName = document.getElementById('chefName').value.trim();
   const university = document.getElementById('universitySelect').value;
   const chapter = document.getElementById('chapterSelect').value;
@@ -725,10 +774,11 @@ function submitForm() {
   const semester = document.getElementById('semesterSelect').value;
   const hdName = document.getElementById('hdName').value.trim();
   const hdEmail = document.getElementById('hdEmail').value.trim();
-  const photoFiles = document.getElementById('photoInput').files;
+  const photoFiles = Array.from(document.getElementById('photoInput').files || []);
   const kuVisible = document.getElementById('kuManagerGroup').style.display !== 'none';
   const kuPicked = document.getElementById('kuManagerSelect').value;
   const note = document.getElementById('requiredNote');
+  const submitBtn = document.getElementById('submitBtn');
 
   const missing = [];
   if (!chefName) missing.push('chef name');
@@ -747,89 +797,79 @@ function submitForm() {
     note.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
+
   note.style.display = 'none';
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Uploading...';
 
-  // Collect checked items
-  const checkedItems = [];
-  document.querySelectorAll('.check-box.checked').forEach(box => {
-    const label = box.closest('.check-item').querySelector('.check-label');
-    if (label) checkedItems.push(label.textContent);
-  });
-
-  // Collect N/A items
-  const naItems = [];
-  document.querySelectorAll('.na-btn.active').forEach(btn => {
-    const label = btn.closest('.check-item').querySelector('.check-label');
-    if (label) naItems.push(label.textContent);
-  });
-
-  // Show success screen immediately — before any async work
-  const hasVideoChecked = document.getElementById('videoInput').checked;
-  document.getElementById('mainForm').style.display = 'none';
-  document.getElementById('successScreen').style.display = 'block';
-  document.getElementById('successChapter').textContent = chapter + ' — ' + university;
-  if (hasVideoChecked) {
-    document.getElementById('folderBox').style.display = 'block';
-  }
-
-  // Convert photos to base64 in background (with 30s timeout per photo)
-  const photoPromises = Array.from(photoFiles).map(file => {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => resolve(null), 30000);
-      const reader = new FileReader();
-      reader.onload = e => {
-        clearTimeout(timeout);
-        const base64 = e.target.result.split(',')[1];
-        const ext = file.name.split('.').pop() || 'jpg';
-        resolve({ data: base64, mimeType: file.type, ext: ext });
-      };
-      reader.onerror = () => { clearTimeout(timeout); resolve(null); };
-      reader.readAsDataURL(file);
+  try {
+    // Collect checked items
+    const checkedItems = [];
+    document.querySelectorAll('.check-box.checked').forEach(box => {
+      const label = box.closest('.check-item').querySelector('.check-label');
+      if (label) checkedItems.push(label.textContent);
     });
-  });
 
-  // Convert video to base64 if present
-  const hasVideo = document.getElementById('videoInput').checked;
-  const videoPromise = Promise.resolve(null); // Video uploaded manually to Drive
+    // Collect N/A items
+    const naItems = [];
+    document.querySelectorAll('.na-btn.active').forEach(btn => {
+      const label = btn.closest('.check-item').querySelector('.check-label');
+      if (label) naItems.push(label.textContent);
+    });
 
-  // Collect form values needed for payload
-  const managerName = document.getElementById('managerName').value;
-  const managerEmail = document.getElementById('managerEmail').value;
-  const notes = document.getElementById('notes').value;
+    const hasVideo = document.getElementById('videoInput').checked;
+    const managerName = document.getElementById('managerName').value;
+    const managerEmail = document.getElementById('managerEmail').value;
+    const notes = document.getElementById('notes').value;
 
-  const textPayload = {
-    chefName, university, chapter, date, semester,
-    hdName, hdEmail, managerName, managerEmail, notes,
-    checkedItems, naItems,
-    photoCount: photoFiles.length,
-    hasVideo: hasVideo
-  };
+    const textPayload = {
+      chefName, university, chapter, date, semester,
+      hdName, hdEmail, managerName, managerEmail, notes,
+      checkedItems, naItems,
+      photoCount: photoFiles.length,
+      hasVideo: hasVideo
+    };
 
-  // Send text data to script (fire and forget — CORS will block response but script still runs)
-  fetch(SCRIPT_URL, {
-    method: 'POST',
-    mode: 'no-cors',
-    body: JSON.stringify({ type: 'text_data', payload: textPayload })
-  });
+    setUploadProgress('Submitting closeout details...', 0, photoFiles.length);
 
-  // Convert and upload photos in background
-  Promise.all(photoPromises).then(photos => {
-    const validPhotos = (photos || []).filter(p => p !== null);
-    validPhotos.forEach(function(photo, i) {
-      fetch(SCRIPT_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        body: JSON.stringify({
-          type: 'file_upload',
-          university, chapter, semester,
-          fileType: 'photo',
-          fileData: photo.data,
-          mimeType: photo.mimeType,
-          fileName: 'photo_' + (i + 1) + '.' + photo.ext
-        })
+    await postJsonNoCors({
+      type: 'text_data',
+      payload: textPayload
+    });
+
+    for (let i = 0; i < photoFiles.length; i++) {
+      const file = photoFiles[i];
+      setUploadProgress('Reading photo ' + (i + 1) + ' of ' + photoFiles.length + ': ' + file.name, i, photoFiles.length);
+      const photo = await fileToBase64(file);
+
+      setUploadProgress('Uploading photo ' + (i + 1) + ' of ' + photoFiles.length + ': ' + file.name, i, photoFiles.length);
+      await postJsonNoCors({
+        type: 'file_upload',
+        university, chapter, semester,
+        fileType: 'photo',
+        fileData: photo.data,
+        mimeType: photo.mimeType,
+        fileName: 'photo_' + (i + 1) + '.' + photo.ext
       });
-    });
-  }).catch(() => {});
+
+      setUploadProgress('Uploaded photo ' + (i + 1) + ' of ' + photoFiles.length, i + 1, photoFiles.length);
+    }
+
+    setUploadProgress('Upload complete. Finalizing...', photoFiles.length, photoFiles.length);
+
+    document.getElementById('mainForm').style.display = 'none';
+    document.getElementById('successScreen').style.display = 'block';
+    document.getElementById('successChapter').textContent = chapter + ' — ' + university;
+    if (hasVideo) {
+      document.getElementById('folderBox').style.display = 'block';
+    }
+  } catch (err) {
+    note.style.display = 'block';
+    note.textContent = 'Upload failed before completion: ' + err.message + '. Please try again, preferably with fewer or smaller photos.';
+    note.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Submit closeout';
+  }
 }
 </script>
 </body>
